@@ -41,9 +41,9 @@ app.post("/api/login", async (req, res) => {
       // Compare the provided password with the hashed password in the database
       if (bcrypt.compareSync(password, hashedPassword)) {
         // Generate a JWT token
-        const token = jwt.sign({ email }, "secretkey");
+        const token = jwt.sign({ email }, "secretkey",{expiresIn:'3d'});
         // Send the token back to the client
-        return res.status(200).json({ token });
+        return res.status(200).json({ token:token,email:email });
       } else {
         return res.status(401).json({ message: "invalid credentials" });
       }
@@ -104,11 +104,13 @@ app.get("/api/logout", (req, res) => {
 // Middleware to handle JWT verification
 const verifyToken = (req, res, next) => {
  const token = req.headers["authorization"];
+ console.log(token)
  if (!token) {
    return res.status(401).json({ message: "unauthorized" });
  }
  try {
-   const decoded = jwt.verify(token, "secretkey");
+  const temp=token.split(' ')[1];
+   const decoded = jwt.verify(temp, "secretkey");
    req.user = decoded;
    next();
  } catch (err) {
@@ -118,11 +120,14 @@ const verifyToken = (req, res, next) => {
 
 // GET route to handle getting a list of products added by a user
 app.get("/api/products", verifyToken, async (req, res) => {
+  console.log(req.body);
  try {
+  console.log(req.user);
    const result = await session.run(
      `MATCH (u:User {email: $email})-[:POSTED]->(p:Product) RETURN p`,
      { email: req.user.email }
    );
+  //  console.log(result);
    const products = result.records.map((record) => record.get(0));
    return res.status(200).json(products);
  } catch (err) {
@@ -130,8 +135,26 @@ app.get("/api/products", verifyToken, async (req, res) => {
    return res.status(500).json({ message: "internal server error" });
  }
 });
+app.get("/api/products/:id", (req, res) => {
+  const productId = req.params.id;
+  session
+      .run(`MATCH (p:Product) WHERE elementId(p) = $productId RETURN p`, { productId })
+      .then(result => {
+          if(result.records.length > 0) {
+            console.log(result.records[0].get("p").properties)
+              res.send(result.records[0].get("p").properties);
+          } else {
+              res.status(404).send({ message: "Product not found"});
+          }
+      })
+      .catch(error => {
+          console.log(error);
+          res.status(500).send({ message: "Error fetching product"});
+      });
+});
+
 // POST route to handle product creation
-app.post("/api/productadd", async (req, res) => {
+app.post("/api/productadd",verifyToken, async (req, res) => {
   const name = req.body.name;
   const description = req.body.description;
   const category = req.body.category;
@@ -144,34 +167,48 @@ app.post("/api/productadd", async (req, res) => {
   }
 
   try {
+    // Find the user with the specified email
+    const user = await session.run(
+      `MATCH (u:User {email: $email}) RETURN u`,
+      { email }
+    );
+    if (user.records.length === 0) {
+      return res.status(404).json({ message: "user not found" });
+    }
+    const userNode = user.records[0].get(0);
     // Create a new product in the database
-    await session.run(
-      `CREATE (p:Product {name: $name, description: $description, category: $category, price: $price, email: $email})`,
-      { name, description, category, price, email }
+    const userId = userNode.elementId;
+    console.log(userId);
+    // Create a new product in the database
+    const product = await session.run(
+      `MATCH (u:User) WHERE elementId(u) = $userId
+      CREATE (p:Product {name: $name, description: $description, category: $category, price: $price, email: $email})
+      CREATE (u)-[:POSTED]->(p)
+    RETURN p, u`,
+      { name, description, category, price, email, userId }
     );
     return res.status(201).json({ message: "product created" });
   } catch (err) {
     console.log(err);
     return res.status(500).json({ message: "internal server error" });
-  }
+  } 
 });
 
 // PUT route to handle updating a product
-app.put("/api/products/:id", verifyToken, async (req, res) => {
+app.put("/api/productadd/:id", verifyToken, async (req, res) => {
     const id = req.params.id;
     const name = req.body.name;
     const description = req.body.description;
     const category = req.body.category;
     const price = req.body.price;
-  
+    console.log(id,'here');
     // Check for required fields
     if (!name || !description || !category || !price) {
       return res.status(400).json({ message: "missing fields" });
     }
-  
     try {
       const result = await session.run(
-        `MATCH (u:User {email: $email})-[:POSTED]->(p:Product {id: $id}) SET p += {name: $name, description: $description, category: $category, price: $price} RETURN p`,
+        `MATCH (u:User {email: $email})-[:POSTED]->(p:Product WHERE elementId(p)=$id) SET p += {name: $name, description: $description, category: $category, price: $price} RETURN p`,
         { email: req.user.email, id, name, description, category, price }
       );
       if (result.records.length) {
@@ -185,4 +222,26 @@ app.put("/api/products/:id", verifyToken, async (req, res) => {
       return res.status(500).json({ message: "internal server error" });
     }
   });
-  
+  app.delete("/api/product/:id", verifyToken, async (req, res) => {
+    const id = req.params.id;
+    console.log(id,'here');
+    try {
+    const result = await session.run(
+    `MATCH (u:User {email: $email})-[:POSTED]->(p:Product WHERE elementId(p)=$id) DETACH  DELETE p`,
+    { email: req.user.email, id }
+    );
+    if (result.summary.counters) {
+    return res.status(200).json({ message: "product deleted successfully"});
+    } else {
+    return res.status(404).json({ message: "product not found" });
+    }
+    } catch (err) {
+    console.log(err);
+    return res.status(500).json({ message: "internal server error" });
+    }
+    });
+    
+    
+    
+    
+    
